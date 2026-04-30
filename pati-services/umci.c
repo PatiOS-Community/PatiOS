@@ -2,7 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
-#define VERSIYON "Pati 0.1"
+#define VERSIYON "Pati 1.0"
 
 int main() {
     FILE *fp;
