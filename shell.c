@@ -5,6 +5,7 @@
 #include <sys/wait.h>
 
 int main(void) {
+    putenv("PATH=/lib/paticommands/:/bin:/pcg-startup:/usr/bin");
     while (1) {
         printf("pati@tr-2.1> ");
         fflush(stdout);
