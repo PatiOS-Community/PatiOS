@@ -99,6 +99,11 @@ for (int i = 0; i < n; i++) {
     char bekle_val[16] = {0};
     char izle_val[16] = {0};
     pcg_read(tamyol, "konumu", dosyayolu, sizeof(dosyayolu));
+    if (dosyayolu[0] != '/' || strstr(dosyayolu, "..") != NULL) {
+        printf("[GUVENLIK] Atlaniyor, gecersiz konum: %s\n", dosyayolu);
+        free(namelist[i]);
+        continue;
+    }
     pcg_read(tamyol, "bekle", bekle_val, sizeof(bekle_val));
     pcg_read(tamyol, "izle", izle_val, sizeof(izle_val));
     char *args[] = {NULL, NULL};
