@@ -152,13 +152,13 @@ int main() {
     printf("             ");
     print_line(" Shell:    ", "Pati-Shell");
     printf("             ");
-    printf("%s             CPU:      %s%s\n", CYAN, YELLOW, cpu);
+    printf("%s   CPU:      %s%s\n", CYAN, YELLOW, cpu);
     printf("             ");
     print_line(" Memory:   ", ram);
     printf("             ");
     print_line(" IP:       ", ip);
     printf("             ");
-    printf("%s             Device:   %s%s\n", CYAN, YELLOW, devid);
+    printf("%s   Device:   %s%s\n", CYAN, YELLOW, devid);
     printf("             ");
     char svc[64];
     snprintf(svc, sizeof(svc), "%d running", services);
