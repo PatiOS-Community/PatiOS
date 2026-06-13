@@ -1,4 +1,3 @@
-#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -8,75 +7,42 @@
 #include <stdlib.h>
 #include <sys/mount.h>
 #include <sys/ioctl.h>
+#include <fcntl.h>
 #include <net/if.h>
 #include <arpa/inet.h>
 #include <linux/route.h>
+#include <signal.h>
 #include <sys/stat.h>
 #include <errno.h>
-#include "pati-headers/pcg.h"
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <pthread.h>
 
-int main() {
-    struct dirent *entry;
-    pid_t pid;
-    struct dirent **namelist;
-    int n = scandir("/dev/pcgconfigs", &namelist, NULL, alphasort);
-    if (n < 0) {
-        perror("[UYARI]: pcgconfigs açılamadı, sistem devam edecek..");
-        while(wait(NULL) > 0);
-        return 0;
-    }
-    printf("----------------------------------------\n");
-    printf("----- MAUVYD Konfigürasyon Sistemi -----\n");
-    printf("-------------Dosya Sistemi--------------\n");
-    printf("-------------  Açılıyor.. --------------\n");
-    mount("proc", "/proc", "proc", 0, NULL);
-    mount("sysfs", "/sys", "sysfs", 0, NULL);
-    mkdir("/data", 0755);
-    mkdir("/data/paticommands", 0755);
-    int ret = mount("/dev/vda", "/data", "ext4", 0, NULL);
-    if (ret == 0) {
-        printf("[TAMAM]: Kalıcı depolama aktifleştirildi.\n");
+#include "mauvyd-headers/mauvyd.h"
+#include "mauvyd-headers/pcg.h"
 
-        DIR *d = opendir("/data/paticommands");
-        if (d) {
-            struct dirent *ent;
-            while ((ent = readdir(d)) != NULL) {
-                if (ent->d_name[0] == '.') continue;
-                char kaynak[512], hedef[512];
-                snprintf(kaynak, sizeof(kaynak), "/data/paticommands/%s", ent->d_name);
-                snprintf(hedef, sizeof(hedef), "/lib/paticommands/%s", ent->d_name);
-                
-                struct stat st;
-                if (stat(kaynak, &st) == 0 && S_ISREG(st.st_mode)) {
-                    int in = open(kaynak, O_RDONLY);
-                    int out = open(hedef, O_WRONLY | O_CREAT | O_TRUNC, 0755);
-                    if (in >= 0 && out >= 0) {
-                        char buf[4096];
-                        ssize_t n;
-                        while ((n = read(in, buf, sizeof(buf))) > 0)
-                            write(out, buf, n);
-                        printf("[TAMAM]: %s kopyalandi.\n", ent->d_name);
-                    }
-                    if (in >= 0) close(in);
-                    if (out >= 0) close(out);
-                }
-            }
-            closedir(d);
-        } else {
-            printf("[BILGI]: /data/paticommands bulunamadi, atlaniyor.\n");
-        }
-        putenv("PATH=/bin:/pcg-startup:/usr/bin:/lib/paticommands");
-    } else if (errno == EBUSY) {
-        printf("[BILGI]: Depolama zaten bagli.\n");
-        putenv("PATH=/bin:/pcg-startup:/usr/bin:/lib/paticommands");
-    } else {
-        perror("[HATA]: Disk baglanamadi");
-        putenv("PATH=/bin:/pcg-startup:/usr/bin:/lib/paticommands");
-    }
-    putenv("TERM=linux");
-    printf("\nYaHnI oLaN vArMı?\n");
-    printf("Pati-2.1 by Mehmet Demir. Kod adı: Ananas (Pineapple)\n");
+#define CONFIG_DIR "/dev/pcgconfigs"
+#define DEFAULT_PATH "/bin:/pcg-startup:/usr/bin:/lib/paticommands"
+#define HOSTNAME "pati@mobile"
+#define OS_NAME "PatiOS - Yeni nesil mobil işletim sistemi"
+
+Service service_table[MAX_SERVICES];
+int service_count = 0;
+sigset_t block_mask, old_mask;
+
+void setup_network(void);
+void sigchld_handler(int sig);
+void* start_control_socket(void* arg);
+int is_running(const char *name);
+void spawn_service(int idx);
+void resolve_and_start(int idx);
+void start_services(struct dirent **namelist, int n);
+void sync_paticommands(void);
+
+void setup_network() {
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) { perror("socket"); return; }
+
     struct ifreq ifr;
     memset(&ifr, 0, sizeof(ifr));
     strncpy(ifr.ifr_name, "eth0", IFNAMSIZ);
@@ -93,80 +59,313 @@ int main() {
 
     struct rtentry route;
     memset(&route, 0, sizeof(route));
-
     struct sockaddr_in *gw = (struct sockaddr_in *)&route.rt_gateway;
     gw->sin_family = AF_INET;
     inet_pton(AF_INET, "10.0.2.2", &gw->sin_addr);
-
     struct sockaddr_in *dst = (struct sockaddr_in *)&route.rt_dst;
     dst->sin_family = AF_INET;
     dst->sin_addr.s_addr = INADDR_ANY;
-
     struct sockaddr_in *mask = (struct sockaddr_in *)&route.rt_genmask;
     mask->sin_family = AF_INET;
     mask->sin_addr.s_addr = INADDR_ANY;
-
     route.rt_flags = RTF_UP | RTF_GATEWAY;
     route.rt_dev = "eth0";
-
     ioctl(fd, SIOCADDRT, &route);
-
     close(fd);
 
     FILE *resolv = fopen("/etc/resolv.conf", "w");
-    if (resolv != NULL) {
+    if (resolv) {
         fprintf(resolv, "nameserver 8.8.8.8\n");
         fclose(resolv);
     }
-for (int i = 0; i < n; i++) {
-    entry = namelist[i];
-    if (strcmp(entry->d_name, ".") == 0) {
-        continue;
-    };
-    if (strcmp(entry->d_name, "..") == 0) {
-        continue;
-    };
-      usleep(10000);
-      printf("İşlem Buldum!: %s\n", entry->d_name);
-      char tamyol[512];
-      snprintf(tamyol, sizeof(tamyol), "/dev/pcgconfigs/%s", entry->d_name);
-    char dosyayolu[256] = {0};
-    char bekle_val[16] = {0};
-    char izle_val[16] = {0};
-    pcg_read(tamyol, "konumu", dosyayolu, sizeof(dosyayolu));
-    if (dosyayolu[0] != '/' || strstr(dosyayolu, "..") != NULL) {
-        printf("[GUVENLIK] Atlanıyor, geçersiz yol: %s\n", dosyayolu);
-        free(namelist[i]);
-        continue;
-    }
-    pcg_read(tamyol, "bekle", bekle_val, sizeof(bekle_val));
-    pcg_read(tamyol, "izle", izle_val, sizeof(izle_val));
-    char *args[] = {NULL, NULL};
-    args[0] = dosyayolu;
-    int bekle = (strcmp(bekle_val, "1") == 0);
-    int izle = (strcmp(izle_val, "1") == 0);
-        if (izle) printf("[INFO] %s işlemi Karabaş Tarafından izlenecektir.\n", dosyayolu);
-
-
-      pid = fork(); // ÇATALLAMA ZAMANII!
-
-    if (pid == -1) {
-        perror("Çatalı Çatalladılar!1 (fork failed)");
-        exit(EXIT_FAILURE);
-        }
-    if (pid > 0 && bekle == 1) {
-        usleep(100000);
-        wait(NULL);
-        }
-
-    if (pid == 0) {
-        printf("Çocuk işlem şu servisi başlatıyor: %s\n", dosyayolu);
-        execv(dosyayolu, args);
-        perror("Oops, Pati hastalandı!");
-        exit(EXIT_FAILURE);
-        }
-free(namelist[i]);
+    printf("[+]: Network aktif (10.0.2.15).\n");
 }
-free(namelist);
-while(wait(NULL) > 0);
+
+void sync_paticommands() {
+    DIR *d = opendir("/data/paticommands");
+    if (!d) { printf("[BILGI]: /data/paticommands bulunamadi.\n"); return; }
+    struct dirent *ent;
+    while ((ent = readdir(d)) != NULL) {
+        if (ent->d_name[0] == '.') continue;
+        char kaynak[512], hedef[512];
+        snprintf(kaynak, sizeof(kaynak), "/data/paticommands/%s", ent->d_name);
+        snprintf(hedef, sizeof(hedef), "/lib/paticommands/%s", ent->d_name);
+        struct stat st;
+        if (stat(kaynak, &st) == 0 && S_ISREG(st.st_mode)) {
+            int in = open(kaynak, O_RDONLY);
+            int out = open(hedef, O_WRONLY | O_CREAT | O_TRUNC, 0755);
+            if (in >= 0 && out >= 0) {
+                char buf[4096]; ssize_t n;
+                while ((n = read(in, buf, sizeof(buf))) > 0) write(out, buf, n);
+                printf("[TAMAM]: %s kopyalandi.\n", ent->d_name);
+            }
+            if (in >= 0) close(in);
+            if (out >= 0) close(out);
+        }
+    }
+    closedir(d);
+}
+
+void sigchld_handler(int sig) {
+    (void)sig;
+    int status;
+    pid_t dead_pid;
+    while ((dead_pid = waitpid(-1, &status, WNOHANG)) > 0) {
+        for (int i = 0; i < service_count; i++) {
+            if (service_table[i].pid == dead_pid && service_table[i].restart) {
+                sleep(1);
+                pid_t new_pid = fork();
+                if (new_pid == 0) {
+                    char *argv[32] = {0};
+                    argv[0] = service_table[i].location;
+                    char tmp[512];
+                    strncpy(tmp, service_table[i].args_str, 511);
+                    char *token = strtok(tmp, " ");
+                    int j = 1;
+                    while (token && j < 31) { argv[j++] = token; token = strtok(NULL, " "); }
+                    execv(service_table[i].location, argv);
+                    exit(1);
+                }
+                service_table[i].pid = new_pid;
+            }
+        }
+    }
+}
+
+void* start_control_socket(void* arg) {
+    (void)arg;
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, "/run/mauvyd.sock", sizeof(addr.sun_path) - 1);
+    unlink("/run/mauvyd.sock");
+    mkdir("/run", 0755);
+    if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) return NULL;
+    listen(fd, 5);
+    while (1) {
+        int client = accept(fd, NULL, NULL);
+        if (client < 0) continue;
+        char buf[256] = {0};
+        read(client, buf, sizeof(buf) - 1);
+        if (strncmp(buf, "status", 6) == 0) {
+            for (int i = 0; i < service_count; i++) {
+                char line[512];
+                int alive = (kill(service_table[i].pid, 0) == 0);
+                snprintf(line, sizeof(line), "%s: %s (pid %d)\n",
+                    service_table[i].location, alive ? "running" : "dead", service_table[i].pid);
+                write(client, line, strlen(line));
+            }
+        } else if (strncmp(buf, "stop ", 5) == 0) {
+            char *name = buf + 5;
+            int found = 0;
+            for (int i = 0; i < service_count; i++) {
+                if (strstr(service_table[i].location, name)) {
+                    kill(service_table[i].pid, SIGTERM);
+                    write(client, "Stopping service...\n", 20);
+                    found = 1;
+                }
+            }
+            if (!found) write(client, "Service not found.\n", 19);
+        }
+        close(client);
+    }
+    return NULL;
+}
+
+void start_services(struct dirent **namelist, int n) {
+    for (int i = 0; i < n; i++) {
+        struct dirent *entry = namelist[i];
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            free(namelist[i]); continue;
+        }
+        char service_name[64] = {0};
+        strncpy(service_name, entry->d_name, sizeof(service_name) - 1);
+        char *dot = strrchr(service_name, '.');
+        if (dot) *dot = '\0';
+        char fulldst[512];
+        snprintf(fulldst, sizeof(fulldst), "%s/%s", CONFIG_DIR, entry->d_name);
+        char location[256] = {0}, wait_str[16] = {0}, izle_str[16] = {0};
+        char args_str[512] = {0}, depends_str[256] = {0}, restart_str[16] = {0};
+        pcg_read(fulldst, "konumu", location, sizeof(location));
+        pcg_read(fulldst, "bekle", wait_str, sizeof(wait_str));
+        pcg_read(fulldst, "izle", izle_str, sizeof(izle_str));
+        pcg_read(fulldst, "args", args_str, sizeof(args_str));
+        pcg_read(fulldst, "depends", depends_str, sizeof(depends_str));
+        pcg_read(fulldst, "restart", restart_str, sizeof(restart_str));
+        if (location[0] != '/') { free(namelist[i]); continue; }
+        if (service_count >= MAX_SERVICES) { free(namelist[i]); continue; }
+        service_table[service_count].pid = 0;
+        strncpy(service_table[service_count].name, service_name, 63);
+        strncpy(service_table[service_count].location, location, 255);
+        strncpy(service_table[service_count].args_str, args_str, 511);
+        strncpy(service_table[service_count].depends_str, depends_str, 255);
+        service_table[service_count].restart = (strcmp(restart_str, "1") == 0);
+        service_table[service_count].visit_state = STATE_UNVISITED;
+        service_count++;
+        if (strcmp(izle_str, "1") == 0)
+            printf("[INFO] %s Karabas tarafindan izlenecek.\n", location);
+        free(namelist[i]);
+    }
+    sigemptyset(&block_mask);
+    sigaddset(&block_mask, SIGCHLD);
+    for (int i = 0; i < service_count; i++)
+        if (service_table[i].visit_state == STATE_UNVISITED)
+            resolve_and_start(i);
+}
+
+void spawn_service(int idx) {
+    sigprocmask(SIG_BLOCK, &block_mask, &old_mask);
+    pid_t pid = fork();
+    if (pid == 0) {
+        sigprocmask(SIG_SETMASK, &old_mask, NULL);
+        char fulldst[512];
+        snprintf(fulldst, sizeof(fulldst), "%s/%s.pcg", CONFIG_DIR, service_table[idx].name);
+        char izle_str[16] = {0};
+        pcg_read(fulldst, "izle", izle_str, sizeof(izle_str));
+        if (strcmp(izle_str, "1") != 0) {
+            char logpath[256];
+            snprintf(logpath, sizeof(logpath), "/tmp/%s.log", service_table[idx].name);
+            int logfd = open(logpath, O_WRONLY | O_CREAT | O_APPEND, 0644);
+            if (logfd >= 0) {
+                dup2(logfd, STDOUT_FILENO);
+                dup2(logfd, STDERR_FILENO);
+                close(logfd);
+            }
+        }
+        char *argv[32] = {0};
+        argv[0] = service_table[idx].location;
+        if (service_table[idx].args_str[0] != '\0') {
+            char *token = strtok(service_table[idx].args_str, " ");
+            int j = 1;
+            while (token && j < 31) { argv[j++] = token; token = strtok(NULL, " "); }
+        }
+        execv(service_table[idx].location, argv);
+        perror("execv failed");
+        exit(1);
+    } else if (pid > 0) {
+        service_table[idx].pid = pid;
+        sigprocmask(SIG_SETMASK, &old_mask, NULL);
+        char fulldst[512];
+        snprintf(fulldst, sizeof(fulldst), "%s/%s.pcg", CONFIG_DIR, service_table[idx].name);
+        char wait_str[16] = {0};
+        pcg_read(fulldst, "bekle", wait_str, sizeof(wait_str));
+        if (strcmp(wait_str, "1") == 0) {
+            int status;
+            waitpid(pid, &status, 0);
+        }
+    }
+}
+
+int is_running(const char *name) {
+    for (int i = 0; i < service_count; i++) {
+        if (strcmp(service_table[i].name, name) == 0) {
+            if (service_table[i].pid <= 0) return 0;
+            return (kill(service_table[i].pid, 0) == 0);
+        }
+    }
+    return 0;
+}
+
+void resolve_and_start(int idx) {
+    if (service_table[idx].visit_state == STATE_VISITING) {
+        printf("[!!!] Circular dependency at: %s\n", service_table[idx].name);
+        return;
+    }
+    if (service_table[idx].visit_state == STATE_VISITED) return;
+    service_table[idx].visit_state = STATE_VISITING;
+    if (service_table[idx].depends_str[0] != '\0') {
+        int dep_found = -1;
+        for (int i = 0; i < service_count; i++)
+            if (strcmp(service_table[i].name, service_table[idx].depends_str) == 0) { dep_found = i; break; }
+        if (dep_found != -1) {
+            resolve_and_start(dep_found);
+            int retries = 0;
+            while (!is_running(service_table[idx].depends_str) && retries < 20) {
+                usleep(50000); retries++;
+            }
+        } else {
+            printf("[!!!] Dependency '%s' for '%s' not found.\n",
+                   service_table[idx].depends_str, service_table[idx].name);
+        }
+    }
+    printf("[+]: Starting: %s\n", service_table[idx].name);
+    spawn_service(idx);
+    service_table[idx].visit_state = STATE_VISITED;
+}
+
+int main() {
+    struct dirent **namelist;
+    int n = scandir(CONFIG_DIR, &namelist, NULL, alphasort);
+
+    printf("----------------------------------------\n");
+    printf("----- MAUVYD Configuration System -----\n");
+    printf("-------------Mounting FS..--------------\n");
+
+    mount("proc", "/proc", "proc", 0, NULL);
+    mount("sysfs", "/sys", "sysfs", 0, NULL);
+
+    mkdir("/data", 0755);
+    mkdir("/data/paticommands", 0755);
+    int ret = mount("/dev/vda1", "/data", "ext4", 0, NULL);
+    if (ret == 0) {
+        printf("[TAMAM]: Kalici depolama aktif.\n");
+        sync_paticommands();
+        putenv("PATH=" DEFAULT_PATH);
+    } else if (errno == EBUSY) {
+        printf("[BILGI]: Depolama zaten bagli.\n");
+        putenv("PATH=" DEFAULT_PATH);
+    } else {
+        perror("[HATA]: Disk baglanamadi");
+        putenv("PATH=" DEFAULT_PATH);
+    }
+
+    mkdir("/dev/imeidata/efs_current", 0755);
+    mkdir("/dev/imeidata/efs_backup", 0755);
+    if (mount("/dev/vda2", "/dev/imeidata/efs_current", "ext4", 0, NULL) == 0)
+        printf("[TAMAM]: EFS aktif deposu baglandi.\n");
+    else
+        perror("[HATA]: EFS aktif depo baglanamadi");
+    if (mount("/dev/vda3", "/dev/imeidata/efs_backup", "ext4", MS_RDONLY, NULL) == 0)
+        printf("[TAMAM]: EFS yedek deposu aktif (read-only).\n");
+    else
+        perror("[HATA]: EFS yedek depo baglanamadi");
+
+    putenv("TERM=linux");
+    sethostname(HOSTNAME, strlen(HOSTNAME));
+    printf("\nYAHNI OLAN VARMI?\n");
+    printf("Pati-2.1 by Mehmet Demir. Kod adi: Ananas (Pineapple)\n");
+
+    setup_network();
+
+    struct sigaction sa;
+    sa.sa_handler = sigchld_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+    sigaction(SIGCHLD, &sa, NULL);
+
+    pthread_t socket_thread;
+    if (pthread_create(&socket_thread, NULL, start_control_socket, NULL) == 0)
+        pthread_detach(socket_thread);
+
+    if (n >= 0) {
+        start_services(namelist, n);
+        free(namelist);
+    }
+
+    while (1) {
+        pid_t shell_pid = fork();
+        if (shell_pid == 0) {
+            char *shell_args[] = {"/bin/shell", NULL};
+            execv("/bin/shell", shell_args);
+            exit(1);
+        } else if (shell_pid > 0) {
+            int status;
+            waitpid(shell_pid, &status, 0);
+            sleep(1);
+        } else {
+            sleep(2);
+        }
+    }
+    return 0;
 }
